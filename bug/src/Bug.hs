@@ -1,5 +1,4 @@
-{-# LANGUAGE RecursiveDo, OverloadedStrings, ScopedTypeVariables, TupleSections, RecordWildCards #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE RecursiveDo, OverloadedStrings, ScopedTypeVariables, TupleSections, TemplateHaskell #-}
 module Main where
 
 import Control.Lens
@@ -14,14 +13,14 @@ import Text.Feed.Import
 import Text.Feed.Types
 import Text.RSS.Syntax
 
-import qualified Data.Map as M
+import qualified Data.Map  as M
 import qualified Data.Text as T
 
 ------------------------------------------------------------------------
 
 data RBFeed = RBFeed {
       _feedName :: T.Text,
-      _feedURL :: URI
+      _feedURL  :: URI
     }
     deriving (Ord, Eq, Show)
 $(makeLenses ''RBFeed)
@@ -31,112 +30,87 @@ data RBFeedState = NotLoaded
                  | Loaded (Maybe Feed)
                   deriving (Show)
 
-data RBFeedItem = RBFeedItem {
-        itemTitle :: T.Text,
-        itemURI   :: Maybe URI
-      }
-      deriving (Eq)
-
 data AppState = AppState {
        _asFeeds        :: M.Map RBFeed RBFeedState,
        _asSelectedFeed :: RBFeed
       }
 $(makeLenses ''AppState)
 
-data AppEvent = FeedFetched (RBFeed, String)
+data AppEvent = FeedLoaded (RBFeed, String)
               | FeedSelected RBFeed
 
-------------------------------------------------------------------------
-
--- | Fold for 'RBFeedState'
-rbfeedstate :: a -> a -> (Maybe Feed -> a) -> RBFeedState -> a
-rbfeedstate nl _ _ NotLoaded   = nl
-rbfeedstate _  l _ Loading     = l
-rbfeedstate _  _ f (Loaded mf) = f mf
 
 initialState :: AppState
-initialState = AppState {..}
-    where
-      _asFeeds        = M.fromList $ zip rawFeeds (repeat NotLoaded)
-      _asSelectedFeed = head rawFeeds
+initialState = AppState { _asFeeds        = M.fromList $ zip rawFeeds (repeat NotLoaded),
+                          _asSelectedFeed = head rawFeeds
+                        }
 
-
-selFeed :: Getter AppState (Maybe (T.Text,Feed))
-selFeed = to $ \as -> do
-            let sel = as ^. asSelectedFeed
-            bfs <- M.lookup sel $ as ^. asFeeds
-            rbfeedstate Nothing Nothing (fmap (sel^.feedName,)) bfs
+selFeed :: AppState -> Maybe (T.Text, Feed)
+selFeed as = do
+  let sel = as^.asSelectedFeed
+  case M.lookup sel $ as^.asFeeds of
+    Just (Loaded mf) -> (sel^.feedName,) <$> mf
+    _ -> Nothing
 
 processEvent :: AppEvent -> AppState -> AppState
-processEvent (FeedFetched (bf,s)) =  asFeeds %~ M.insert bf (Loaded $ parseFeedString s)
-processEvent (FeedSelected bf)    = (asFeeds %~ M.insert bf Loading) .
-                                    (asSelectedFeed .~ bf)
+processEvent (FeedLoaded (bf,s)) =  asFeeds %~ M.insert bf (Loaded $ parseFeedString s)
+processEvent (FeedSelected bf)   = (asFeeds %~ M.insert bf Loading) .
+                                   (asSelectedFeed .~ bf)
 
 
 ------------------------------------------------------------------------
 
 main :: IO ()
-main = mainWidgetWithHead (el "style" $ do
-                             text ".sel       {color:blue}"
-                             text ".loading   {color:green}"
-                             text ".loaded    {color:pink}"
-                             text ".notloaded {color:grey}"
-                             text ".failed    {color:red}"
-                          ) $
+main = mainWidgetWithHead (return ()) $
   do
 
-  el "p" $ el "h3" $ text "Reflex 'simpleList' combinator bug"
+  el "p" $ el "h3" $ text "Reflex 'simpleList' / 'performEventAsync' bug"
   el "p" $ do
            text "Click on the RSS Feeds below to load them. "
            text "The most-recently clicked feed is selected. "
            text "The RSS Feed Items of the currently selected feed are shown below. "
   el "p" $ text "If you switch between the feeds quickly enough you will see that the DOM 'div' nodes for one of the feeds sometimes get 'orphaned' and left in the DOM - this leads to the items of two feeds being shown simultaneously which should never happen."
-  rec state      <- foldDyn processEvent initialState $ leftmost [efetched, fmap FeedSelected esel]
-      ditems     <- mapDyn (feedRBItems . view selFeed) state -- Items of selected feed
 
-      -- Render the UI
-      esel       <- feedList
-      void        $ simpleList ditems (el "div" . dynText <=< mapDyn (T.unpack . itemTitle))
+  -- Manage the AppState as a fold over AppEvents
+  rec state      <- foldDyn processEvent initialState $ leftmost [eloaded, fmap FeedSelected esel]
+      ditems     <- mapDyn (parseFeedItems . selFeed) state -- Items of selected feed
 
-      efetched   <- fetchFeed esel -- Load the selected RSS Feed
+      -- Render the List of Feeds
+      esel       <- el "ul" $ do
+                              let [f1,f2,f3] = rawFeeds
+                              (elt1,_) <- el' "li" $ text "Feed 1"
+                              (elt2,_) <- el' "li" $ text "Feed 2"
+                              (elt3,_) <- el' "li" $ text "Feed 3"
+
+                              return $ leftmost [
+                                          f1 <$ domEvent Click elt1,
+                                          f2 <$ domEvent Click elt2,
+                                          f3 <$ domEvent Click elt3
+                                         ]
+
+      -- Render the List of Items in the currently-selected Feed
+      void        $ simpleList ditems (el "div" . dynText)
+
+      -- Load the selected RSS Feed
+      eloaded    <- loadFeed esel
 
   blank
   return ()
 
 ------------------------------------------------------------------------
 
--- | Returns an Event showing the retrieved feed contents as a String
-fetchFeed :: forall t m . MonadWidget t m => Event t RBFeed -> m (Event t AppEvent)
-fetchFeed evt = do
+-- | Returns an Event showing the loaded feed contents
+loadFeed :: forall t m . MonadWidget t m => Event t RBFeed -> m (Event t AppEvent)
+loadFeed evt = do
       let req f = xhrRequest "GET" (show $ f^.feedURL) def
-      fmap FeedFetched <$>
+      fmap FeedLoaded <$>
         performAJAX req (maybe "nope" T.unpack . _xhrResponse_body) evt
 
--- | Parse the Feed
-feedRBItems :: Maybe (T.Text,Feed) -> [RBFeedItem]
-feedRBItems (Just (s, RSSFeed rss)) = [RBFeedItem (maybe "NO_TITLE" prepTitle $ rssItemTitle ri)
-                                                  (parseURI =<< rssItemLink ri) |
-                                       let prepTitle = ((s <>) . (" : " <>) . T.pack),
-                                       ri <- rssItems $ rssChannel rss]
-feedRBItems _                       = []
 
-------------------------------------------------------------------------
-
--- | Render a list of Feeds.
---   Returns an Event of clicked-on RBFeeds
-feedList :: forall t m . MonadWidget t m => m (Event t RBFeed)
-feedList = el "ul" $ do
-  let [f1,f2,f3] = rawFeeds
-  (elt1,_) <- el' "li" $ text "Feed 1"
-  (elt2,_) <- el' "li" $ text "Feed 2"
-  (elt3,_) <- el' "li" $ text "Feed 3"
-
-  return $ leftmost [
-              f1 <$ domEvent Click elt1,
-              f2 <$ domEvent Click elt2,
-              f3 <$ domEvent Click elt3
-             ]
-  
+parseFeedItems :: Maybe (T.Text, Feed) -> [String]
+parseFeedItems (Just (feed, RSSFeed rss)) = [(maybe "NO_TITLE" ((T.unpack feed<>) . (" : "<>)) $ rssItemTitle ri) |
+                                             ri <- rssItems $ rssChannel rss]
+parseFeedItems _                          = []
 
 ------------------------------------------------------------------------
 
@@ -150,6 +124,10 @@ rawFeeds = [
     staticUri s = fromMaybe (error $ "Bad static URI: " <> s) $ parseURI s
 
 
+--
+-- Function copied from 'reflex-dom-contrib':
+-- [https://hackage.haskell.org/package/reflex-dom-contrib-0.1/docs/Reflex-Dom-Contrib-Xhr.html#v:performAJAX]
+--
 -- | This is the foundational primitive for the XHR API because it gives you
 -- full control over request generation and response parsing and also allows
 -- you to match things that generated the request with their corresponding
