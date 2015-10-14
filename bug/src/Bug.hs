@@ -88,6 +88,12 @@ main = mainWidgetWithHead (el "style" $ do
                           ) $
   do
 
+  el "p" $ el "h3" $ text "Reflex 'simpleList' combinator bug"
+  el "p" $ do
+           text "Click on the RSS Feeds below to load them. "
+           text "The most-recently clicked feed is selected. "
+           text "The RSS Feed Items of the currently selected feed are shown below. "
+  el "p" $ text "If you switch between the feeds quickly enough you will see that the DOM 'div' nodes for one of the feeds sometimes get 'orphaned' and left in the DOM - this leads to the items of two feeds being shown simultaneously which should never happen."
   rec efeed      <- feedList dbfms -- Returns Event of RBFeed clicks
       void        $ itemList ditems
       ebffetched <- fmap FeedFetched <$> fetchFeed efeed 
