@@ -2,9 +2,6 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Main where
 
--- import GHCJS.Types
--- import GHCJS.Marshal
-
 import Control.Lens
 import Control.Monad
 import Control.Monad.IO.Class
@@ -42,7 +39,7 @@ data RBFeedItem = RBFeedItem {
 
 data AppState = AppState {
        _asFeeds        :: M.Map RBFeed RBFeedState,
-       _asSelectedFeed :: Maybe RBFeed
+       _asSelectedFeed :: RBFeed
       }
 $(makeLenses ''AppState)
 
@@ -61,19 +58,19 @@ initialState :: AppState
 initialState = AppState {..}
     where
       _asFeeds        = M.fromList $ zip rawFeeds (repeat NotLoaded)
-      _asSelectedFeed = Nothing
+      _asSelectedFeed = head rawFeeds
 
 
 selFeed :: Getter AppState (Maybe (T.Text,Feed))
 selFeed = to $ \as -> do
-            sel <- as ^. asSelectedFeed
+            let sel = as ^. asSelectedFeed
             bfs <- M.lookup sel $ as ^. asFeeds
             rbfeedstate Nothing Nothing (fmap (sel^.feedName,)) bfs
 
 processEvent :: AppEvent -> AppState -> AppState
 processEvent (FeedFetched (bf,s)) =  asFeeds %~ M.insert bf (Loaded $ parseFeedString s)
 processEvent (FeedSelected bf)    = (asFeeds %~ M.insert bf Loading) .
-                                    (asSelectedFeed .~ Just bf)
+                                    (asSelectedFeed .~ bf)
 
 
 ------------------------------------------------------------------------
@@ -94,23 +91,27 @@ main = mainWidgetWithHead (el "style" $ do
            text "The most-recently clicked feed is selected. "
            text "The RSS Feed Items of the currently selected feed are shown below. "
   el "p" $ text "If you switch between the feeds quickly enough you will see that the DOM 'div' nodes for one of the feeds sometimes get 'orphaned' and left in the DOM - this leads to the items of two feeds being shown simultaneously which should never happen."
-  rec efeed      <- feedList dbfms -- Returns Event of RBFeed clicks
-      void        $ itemList ditems
-      ebffetched <- fmap FeedFetched <$> fetchFeed efeed 
-      state      <- foldDyn processEvent initialState $ leftmost [ebffetched, fmap FeedSelected efeed]
+  rec state      <- foldDyn processEvent initialState $ leftmost [efetched, fmap FeedSelected esel]
       ditems     <- mapDyn (feedRBItems . view selFeed) state -- Items of selected feed
-      dbfms      <- mapDyn (view asFeeds) state
+      dbfms      <- mapDyn (view asFeeds)               state
+      dsel       <- mapDyn (view asSelectedFeed)        state
+
+      -- Render the UI
+      esel       <- feedList dsel dbfms -- Returns Event of RBFeed clicks
+      void        $ itemList ditems
+
+      efetched   <- fetchFeed esel -- Load the selected RSS Feed
+
   blank
-  -- wombat =<< getPostBuild
   return ()
 
 ------------------------------------------------------------------------
 
 -- | Returns an Event showing the retrieved feed contents as a String
-fetchFeed :: forall t m . MonadWidget t m => Event t RBFeed -> m (Event t (RBFeed,String))
+fetchFeed :: forall t m . MonadWidget t m => Event t RBFeed -> m (Event t AppEvent)
 fetchFeed evt = do
       let req f = xhrRequest "GET" (show $ f^.feedURL) def
-      traceEventWith (\s -> "[AJAX_RETURNED] " <> show (length s)) <$>
+      fmap FeedFetched . traceEventWith (\s -> "[AJAX_RETURNED] " <> show (length s)) <$>
         performAJAX req (maybe "nope" T.unpack . _xhrResponse_body) evt
 
 -- | Parse the Feed
@@ -118,42 +119,35 @@ feedRBItems :: Maybe (T.Text,Feed) -> [RBFeedItem]
 feedRBItems (Just (s, RSSFeed rss)) = [RBFeedItem (maybe "NO_TITLE" ((s <>) . (" : " <>) . T.pack) $ rssItemTitle ri)
                                                  (parseURI =<< rssItemLink ri) |
                                       ri <- rssItems $ rssChannel rss]
-feedRBItems _                       = [] -- [RBFeedItem "ERR..." Nothing]
+feedRBItems _                       = []
 
 ------------------------------------------------------------------------
 
 -- | Render a list of Feeds.
 --   Returns an Event of clicked-on RBFeeds
-feedList :: forall t m . MonadWidget t m => Dynamic t (M.Map RBFeed RBFeedState) -> m (Event t RBFeed)
-feedList ds = do
-    dfeeds <- mapDyn M.toList ds
-    el "ul" $ selectList fst dfeeds feed
+feedList :: forall t m . MonadWidget t m => Dynamic t RBFeed -> Dynamic t (M.Map RBFeed RBFeedState) -> m (Event t RBFeed)
+feedList dsel ds = el "ul" $ selectViewListWithKey_ dsel ds feed
 
 
 -- | Render an individual Feed
 --   Returns an Event of when the Feed is clicked-on
-feed :: forall t m . MonadWidget t m => Dynamic t ((RBFeed, RBFeedState), Bool) -> m (Event t RBFeed)
-feed dbffs = mdo
+feed :: forall t m . MonadWidget t m => RBFeed -> Dynamic t RBFeedState -> Dynamic t Bool -> m (Event t RBFeed)
+feed f dfeedst dsel = mdo
   let styleItem :: RBFeedState -> M.Map String String
       styleItem = ("class" =:) . rbfeedstate "notloaded" "loading" (maybe "failed" (const "loaded"))
 
       numItems :: RBFeedState -> String
       numItems = rbfeedstate "[?] " "[...] " (("["<>) . (<>"] ") . show . length . feedRBItems . fmap ("",))
 
-  dfeed     <- mapDyn (fst . fst) dbffs
-  dfeedst   <- mapDyn (snd . fst) dbffs
-  dsel      <- mapDyn snd         dbffs
-
-  dfeedcnt  <- mapDyn numItems                   dfeedst
-  datts     <- mapDyn styleItem                  dfeedst
-  dfeedname <- mapDyn (T.unpack . view feedName) dfeed
+  dfeedcnt  <- mapDyn numItems  dfeedst
+  datts     <- mapDyn styleItem dfeedst
   dattssel  <- selClassIf datts dsel
 
   (elt,_)   <- elDynAttr' "li" dattssel (do
                                       el "span" $ dynText dfeedcnt
-                                      dynText dfeedname
+                                      text $ T.unpack $ f^.feedName
                                      )
-  return $ traceEvent "[FEED_CHOSEN]:"             $ tag (current dfeed) $
+  return $ traceEvent "[FEED_CHOSEN]:"             $ fmap (const f) $
            traceEventWith (const "[FEED_CLICKED]") $ domEvent Click elt
 
 
@@ -180,24 +174,6 @@ rawFeeds = [
   ]
 
 
--- | This is a variant of 'simpleList' which manages a current selection.
---   The 'Bool' accepted by the rendering function indicates whether the
---   element in question is currently selected or not.
-selectList :: forall t m a i . (Eq i, MonadWidget t m) =>
-              (a -> i) -> Dynamic t [a] -> (Dynamic t (a, Bool) -> m (Event t i)) -> m (Event t i)
-selectList getItem ds fn = mdo
-  let ev :: Event t i
-      ev = switch $ fmap leftmost $ current evs
-
-      markSel :: [a] -> Maybe i -> [(a,Bool)]
-      markSel as ma = [(a, ma == Just (getItem a)) | a <- as]
-
-  dbs <- combineDyn markSel ds (dma :: Dynamic t (Maybe i))
-  evs <- simpleList (dbs :: Dynamic t [(a,Bool)]) (fn :: (Dynamic t (a, Bool) -> m (Event t i)))
-  dma <- holdDyn Nothing (Just <$> ev)
-  return ev
-
-
 -- | This is the foundational primitive for the XHR API because it gives you
 -- full control over request generation and response parsing and also allows
 -- you to match things that generated the request with their corresponding
@@ -219,20 +195,4 @@ selClassIf :: MonadWidget t m => Dynamic t (M.Map String String) -> Dynamic t Bo
 selClassIf dattr dsel = combineDyn (\attr sel -> if sel then ("class" =: "sel") .<>. attr else attr) dattr dsel
   where
     (.<>.) = M.unionWith (\v1 v2 -> v1 <> "  " <> v2) -- Combine eg multiple "class" attr vlas
-
-------------------------------------------------------------------------
--- JS FFI Interop
-{-
-foreign import javascript unsafe "console['log']($1)" consoleLog :: JSRef a -> IO ()
-
--- Basic Haskell -> JS FFI Interop example
-wombat :: forall t m . MonadWidget t m => Event t () -> m (Event t ())
-wombat ev = performEventAsync (go <$ ev)
-    where
-      go :: (() -> IO ()) -> WidgetHost m ()
-      go cb = do
-              liftIO $ consoleLog =<< toJSRef ("Wombat" :: T.Text)
-              liftIO $ cb ()
--}
-
 
