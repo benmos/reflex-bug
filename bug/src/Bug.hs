@@ -1,4 +1,4 @@
-{-# LANGUAGE RecursiveDo, OverloadedStrings, ScopedTypeVariables, TupleSections, TemplateHaskell #-}
+{-# LANGUAGE RecursiveDo, OverloadedStrings, ScopedTypeVariables, TupleSections, TemplateHaskell, Rank2Types #-}
 module Main where
 
 import Control.Lens
@@ -83,13 +83,20 @@ main = mainWidgetWithHead (return ()) $
                                          ]
 
       -- Render the List of Items in the currently-selected Feed
-      void        $ simpleList ditems (el "div" . dynText)
+      -- void        $ simpleList ditems (el "div" . dynText) -- DOESN'T WORK (intermittently leaves orphan DOM nodes)
+      void        $ widgetHold (items []) (items <$> updated ditems) -- WORKS
 
       -- Load the selected RSS Feed
       eloaded    <- loadFeed esel
 
   blank
   return ()
+
+items :: forall t m . MonadWidget t m => [String] -> m ()
+items = mapM_ item
+
+item :: forall t m . MonadWidget t m => String -> m ()
+item = el "div" . text
 
 ------------------------------------------------------------------------
 
