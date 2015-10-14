@@ -2,7 +2,6 @@
 module Main where
 
 import Control.Lens
-import Control.Monad
 import Control.Monad.IO.Class
 import Data.Maybe
 import Data.Monoid
@@ -83,8 +82,12 @@ main = mainWidgetWithHead (return ()) $
                                          ]
 
       -- Render the List of Items in the currently-selected Feed
-      -- void        $ simpleList ditems (el "div" . dynText) -- DOESN'T WORK (intermittently leaves orphan DOM nodes)
-      void        $ widgetHold (items []) (items <$> updated ditems) -- WORKS
+      let td = elAttr "td" ("style" =: "border: solid 1px")
+      el "table" $ do
+        el "tr" $ el "th" (text "widgetHold") >> el "th" (text "simpleList")
+        el "tr" $ do
+          td (widgetHold (items []) (items <$> updated ditems)) -- WORKS
+          td (simpleList ditems (el "div" . dynText)) -- DOESN'T WORK (intermittently leaves orphan DOM nodes)
 
       -- Load the selected RSS Feed
       eloaded    <- loadFeed esel
@@ -93,10 +96,7 @@ main = mainWidgetWithHead (return ()) $
   return ()
 
 items :: forall t m . MonadWidget t m => [String] -> m ()
-items = mapM_ item
-
-item :: forall t m . MonadWidget t m => String -> m ()
-item = el "div" . text
+items = mapM_ (el "div" . text)
 
 ------------------------------------------------------------------------
 
