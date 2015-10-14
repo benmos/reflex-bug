@@ -25,13 +25,8 @@ data RBFeed = RBFeed {
     deriving (Ord, Eq, Show)
 $(makeLenses ''RBFeed)
 
-data RBFeedState = NotLoaded
-                 | Loading
-                 | Loaded (Maybe Feed)
-                  deriving (Show)
-
 data AppState = AppState {
-       _asFeeds        :: M.Map RBFeed RBFeedState,
+       _asFeeds        :: M.Map RBFeed (Maybe Feed),
        _asSelectedFeed :: RBFeed
       }
 $(makeLenses ''AppState)
@@ -41,7 +36,7 @@ data AppEvent = FeedLoaded (RBFeed, String)
 
 
 initialState :: AppState
-initialState = AppState { _asFeeds        = M.fromList $ zip rawFeeds (repeat NotLoaded),
+initialState = AppState { _asFeeds        = M.fromList $ zip rawFeeds (repeat Nothing),
                           _asSelectedFeed = head rawFeeds
                         }
 
@@ -49,13 +44,12 @@ selFeed :: AppState -> Maybe (T.Text, Feed)
 selFeed as = do
   let sel = as^.asSelectedFeed
   case M.lookup sel $ as^.asFeeds of
-    Just (Loaded mf) -> (sel^.feedName,) <$> mf
-    _ -> Nothing
+    Just mf -> (sel^.feedName,) <$> mf
+    _       -> Nothing
 
 processEvent :: AppEvent -> AppState -> AppState
-processEvent (FeedLoaded (bf,s)) =  asFeeds %~ M.insert bf (Loaded $ parseFeedString s)
-processEvent (FeedSelected bf)   = (asFeeds %~ M.insert bf Loading) .
-                                   (asSelectedFeed .~ bf)
+processEvent (FeedLoaded (bf,s)) = asFeeds %~ M.insert bf (parseFeedString s)
+processEvent (FeedSelected bf)   = asSelectedFeed .~ bf
 
 
 ------------------------------------------------------------------------
